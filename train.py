@@ -4,13 +4,13 @@ import json
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
-from src.action_model import ActionDataset, ActionGRU
+from src.action_model import ActionDataset, ActionHybridNet
 from src.shared import WINDOW_SIZE, NUM_FEATURES
 
 # Hyperparameters:
 BATCH_SIZE = 32
 LEARNING_RATE = 0.001
-EPOCHS = 50
+EPOCHS = 60
 CSV_PATH = "output/hmdb51.csv"
 MODEL_SAVE_PATH = "output/action_gru.pth"
 ONNX_SAVE_PATH = "output/action_gru.onnx"
@@ -19,41 +19,51 @@ LABEL_MAP_PATH = "output/label_map.json"
 
 def train():
     """
-    Executes the training and validation pipeline, saving the best checkpoint and ONNX export.
+    Executes the training and validation pipeline using the Hybrid 1D-CNN + BiGRU architecture.
+    Saves the best model checkpoint and exports it to ONNX format for live inference.
     """
 
     # Check device:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Training on device: [{device}]")
 
-    # Load full dataset:
+    # Base dataset check to extract class mappings:
     if not os.path.exists(CSV_PATH):
         print(f"Error: Dataset not found at {CSV_PATH}. Run ingestion first!")
         return
-    full_dataset = ActionDataset(CSV_PATH)
-    num_classes = len(full_dataset.label_map)
-    print(f"Loaded {len(full_dataset)} total sequences across {num_classes} classes.")
+    base_dataset = ActionDataset(CSV_PATH, is_training=False)
+    num_classes = len(base_dataset.label_map)
+    print(f"Loaded {len(base_dataset)} total sequences across {num_classes} classes.")
 
-    # Save label map to JSON so the live stream inference knows which ID maps to which text string:
     with open(LABEL_MAP_PATH, "w") as f:
-        json.dump(full_dataset.label_map, f, indent=4)
+        json.dump(base_dataset.label_map, f, indent=4)
     print(f"Saved label mapping to: {LABEL_MAP_PATH}")
 
-    # 80/20 Train-Validation Split:
-    train_size = int(0.8 * len(full_dataset))
-    val_size = len(full_dataset) - train_size
-    train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
+    # 80/20 Train-Validation Split using indices:
+    train_size = int(0.8 * len(base_dataset))
+    val_size = len(base_dataset) - train_size
+    train_indices, val_indices = random_split(range(len(base_dataset)), [train_size, val_size])
+
+    # Instantiate distinct datasets: Training gets augmentation, Validation is clean:
+    train_dataset = torch.utils.data.Subset(ActionDataset(CSV_PATH, label_map=base_dataset.label_map, is_training=True), train_indices)
+    val_dataset = torch.utils.data.Subset(ActionDataset(CSV_PATH, label_map=base_dataset.label_map, is_training=False), val_indices)
+
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
-    # Initialize model, loss function, and optimizer:
-    model = ActionGRU(input_size=NUM_FEATURES, hidden_size=64, num_layers=3, num_classes=num_classes).to(device)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    # Initialize Hybrid Net, Smooth Loss, and Optimizer:
+    model = ActionHybridNet(input_size=NUM_FEATURES, hidden_size=64, num_layers=2, num_classes=num_classes).to(device)
 
-    # Training loop:
+    # Label Smoothing prevents overconfidence on noisy academic movie cuts:
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
+
+    # Cosine Annealing smoothly decays learning rate to prevent plateauing:
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-5)
+
     best_val_acc = 0.0
     print("\nStarting Training Loop...")
+
     for epoch in range(EPOCHS):
         model.train()
         train_loss = 0.0
@@ -70,6 +80,9 @@ def train():
             # Backward pass and optimization:
             optimizer.zero_grad()
             loss.backward()
+
+            # Gradient clipping prevents gradient explosion during sharp 1D convolutions:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
             # Track metrics:
@@ -77,6 +90,8 @@ def train():
             _, predicted = torch.max(outputs.data, 1)
             total_train += labels.size(0)
             correct_train += (predicted == labels).sum().item()
+
+        scheduler.step()
 
         epoch_train_loss = train_loss / total_train
         epoch_train_acc = (correct_train / total_train) * 100.0
@@ -103,7 +118,8 @@ def train():
 
         print(f"Epoch [{epoch + 1:02d}/{EPOCHS:02d}] | "
               f"Train Loss: {epoch_train_loss:.4f} - Acc: {epoch_train_acc:.2f}% | "
-              f"Val Loss: {epoch_val_loss:.4f} - Acc: {epoch_val_acc:.2f}%")
+              f"Val Loss: {epoch_val_loss:.4f} - Acc: {epoch_val_acc:.2f}% | "
+              f"LR: {scheduler.get_last_lr()[0]:.6f}")
 
         # Save best model checkpoint:
         if epoch_val_acc > best_val_acc:

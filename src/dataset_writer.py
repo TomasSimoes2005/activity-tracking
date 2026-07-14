@@ -1,15 +1,16 @@
 import csv
 import os
+import numpy as np
 from collections import defaultdict, deque
-from src.shared import WINDOW_SIZE, extract_features
+from src.shared import WINDOW_SIZE, NUM_FEATURES, extract_features
 
 
 class DatasetWriter:
     """
-    Class for writing WINDOW_SIZE-frame temporal keypoint sequences into a CSV file for time-series action models.
+    Class for writing temporal keypoint sequences into a CSV file for time-series action models.
     """
 
-    def __init__(self, filename="output/dataset.csv", window_size=WINDOW_SIZE):
+    def __init__(self, filename="output/hmdb51.csv", window_size=WINDOW_SIZE):
         """
         Constructor. Initializes CSV file with headers if not already present.
         :param filename: name of the CSV file.
@@ -21,14 +22,21 @@ class DatasetWriter:
         self.window_size = window_size
         self.track_buffers = defaultdict(lambda: deque(maxlen=window_size))  # Maps track_id to window
 
+        # Ensure output directory exists to prevent FileNotFoundError:
+        output_dir = os.path.dirname(self.filename)
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir, exist_ok=True)
+
         # Create header if it doesn't exist yet:
         if not os.path.exists(self.filename):
             with open(self.filename, mode='w', newline='') as f:
                 writer = csv.writer(f)
                 header = ["label"]
                 for f_idx in range(self.window_size):
+                    # 34 normalized coordinate features:
                     for k_idx in range(17):
                         header.extend([f"f{f_idx}_p{k_idx}_x", f"f{f_idx}_p{k_idx}_y"])
+                    # 8 orientation and kinematic features:
                     header.extend([
                         f"f{f_idx}_lw_dist", f"f{f_idx}_rw_dist",
                         f"f{f_idx}_lw_elev", f"f{f_idx}_rw_elev",
@@ -39,21 +47,24 @@ class DatasetWriter:
 
     def _extract_enriched_features(self, keypoints, bbox):
         """
-        Calls shared.py's extract_features (compatibility function).
+        Extracts 42 features per frame: 34 anatomically normalized coordinates + 8 orientation/kinematic metrics.
+        :param keypoints: keypoint data.
+        :param bbox: bounding box data.
+        :return: enriched feature list of length 42.
         """
 
         return extract_features(keypoints, bbox)
 
     def process_and_save(self, label, track_id, keypoints, bbox):
         """
-        Normalizes frame keypoints, appends to the tracked person's rolling buffer and saves a sequence row once the buffer reaches window_size.
+        Extracts enriched features per frame, appends to the buffer, and saves a sequence row once window_size is reached.
         :param label: label of the activity.
         :param track_id: id of the person.
         :param keypoints: keypoint data.
         :param bbox: bounding box data.
         """
 
-        # Get normalized keypoints:
+        # Get enriched features:
         norm_kpts = self._extract_enriched_features(keypoints, bbox)
         self.track_buffers[track_id].append(norm_kpts)
 
@@ -72,7 +83,7 @@ class DatasetWriter:
 
     def pad_and_flush(self, label, min_frames=10):
         """
-        Pads incomplete sequences using Edge Padding (repeating the last known pose), saves them to CSV, and clears the memory buffers.
+        Pads incomplete sequences using Edge Padding, saves them to CSV, and clears the buffers.
         :param label: label of the activity.
         :param min_frames: minimum required frames to justify padding and saving.
         """
@@ -80,13 +91,13 @@ class DatasetWriter:
         # Check all tracked persons in memory:
         for track_id, buffer in list(self.track_buffers.items()):
 
-            # If sequence is shorter than WINDOW_SIZE frames but longer than our minimum quality threshold:
+            # If sequence is shorter than window_size but longer than our minimum quality threshold:
             if min_frames <= len(buffer) < self.window_size:
 
                 # Grab the final posture observed for this person:
                 last_frame_pose = buffer[-1]
 
-                # Edge pad: repeat the final posture until we hit window_size (WINDOW_SIZE):
+                # Edge pad: repeat the final posture until we hit window_size:
                 while len(buffer) < self.window_size:
                     buffer.append(last_frame_pose)
 
