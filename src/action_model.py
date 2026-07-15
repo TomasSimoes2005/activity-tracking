@@ -44,13 +44,13 @@ class ActionDataset(Dataset):
 
         # Create or use existing label mapping:
         if label_map is None:
-            unique_labels = sorted(list(set(raw_labels)))
+            unique_labels = sorted(list(set(filtered_labels)))
             self.label_map = {label: idx for idx, label in enumerate(unique_labels)}
         else:
             self.label_map = label_map
 
         # Encode labels to integers:
-        self.labels = np.array([self.label_map[lbl] for lbl in raw_labels], dtype=np.int64)
+        self.labels = np.array([self.label_map[lbl] for lbl in filtered_labels], dtype=np.int64)
 
     def __len__(self):
         """

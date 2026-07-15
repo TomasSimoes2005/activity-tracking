@@ -15,7 +15,7 @@ class ActionPredictor:
     Class for real-time temporal action recognition using an exported ONNX model.
     """
 
-    def __init__(self, model_path="output/action_gru.onnx", label_map_path="output/label_map.json", window_size=WINDOW_SIZE):
+    def __init__(self, model_path="output/model.onnx", label_map_path="output/label_map.json", window_size=WINDOW_SIZE):
         """
         Constructor. Loads the ONNX runtime session and label mapping.
         :param model_path: path to the exported ONNX model file.

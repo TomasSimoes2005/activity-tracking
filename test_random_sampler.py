@@ -16,14 +16,14 @@ YOLO_MODEL = "yolo11n-pose.pt"
 
 # Only sample from these specific target classes:
 TARGET_LABELS = [
+    "fall_floor",
+    "lie_sleep",
+    "sit",
+    "stand",
     "drink",
     "eat",
-    "fall_floor",
-    "run",
-    "sit",
     "smoke",
-    "stand",
-    "walk"
+    "cellphone"
 ]
 
 
@@ -54,7 +54,7 @@ def gather_random_samples(input_dir, samples_per_label=2, target_labels=None):
     :return: list of selected filepaths or folder paths.
     """
 
-    # Convert target list to a lowercase set for lightning-fast O(1) lookups:
+    # Convert target list to a lowercase set for lookups:
     target_set = {lbl.lower() for lbl in target_labels} if target_labels is not None else None
     valid_vid_exts = ('.mp4', '.avi', '.mov', '.mkv')
     valid_img_exts = ('.jpg', '.jpeg', '.png', '.bmp')
@@ -150,7 +150,7 @@ def run_test_pipeline(input_dir="input", samples_per_label=2, target_labels=None
     # Gather playlist:
     playlist = gather_random_samples(input_dir, samples_per_label, target_labels)
     if not playlist:
-        print("Error: No valid video files or JPG sequences found in input directory.")
+        print(f"Error: No valid video files or JPG sequences found in input directory {input_dir}.")
         return
 
     # Initialize shared buffer and browser server thread:
@@ -238,4 +238,4 @@ def run_test_pipeline(input_dir="input", samples_per_label=2, target_labels=None
 
 
 if __name__ == "__main__":
-    run_test_pipeline(input_dir="input/HMDB51", samples_per_label=5, target_labels=TARGET_LABELS, port=8080)
+    run_test_pipeline(input_dir="input/ava_kinetics/videos", samples_per_label=5, target_labels=TARGET_LABELS, port=8080)

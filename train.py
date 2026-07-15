@@ -31,22 +31,28 @@ def train():
     if not os.path.exists(CSV_PATH):
         print(f"Error: Dataset not found at {CSV_PATH}. Run ingestion first!")
         return
-    base_dataset = ActionDataset(CSV_PATH, is_training=False)
-    num_classes = len(base_dataset.label_map)
-    print(f"Loaded {len(base_dataset)} total sequences across {num_classes} classes.")
+    full_dataset = ActionDataset(CSV_PATH, is_training=False)
+    num_classes = len(full_dataset.label_map)
+    print(f"Loaded {len(full_dataset)} valid sequences across {num_classes} classes.")
 
     with open(LABEL_MAP_PATH, "w") as f:
-        json.dump(base_dataset.label_map, f, indent=4)
+        json.dump(full_dataset.label_map, f, indent=4)
     print(f"Saved label mapping to: {LABEL_MAP_PATH}")
 
     # 80/20 Train-Validation Split using indices:
-    train_size = int(0.8 * len(base_dataset))
-    val_size = len(base_dataset) - train_size
-    train_indices, val_indices = random_split(range(len(base_dataset)), [train_size, val_size])
+    train_size = int(0.8 * len(full_dataset))
+    val_size = len(full_dataset) - train_size
+    train_indices, val_indices = random_split(range(len(full_dataset)), [train_size, val_size])
 
     # Instantiate distinct datasets: Training gets augmentation, Validation is clean:
-    train_dataset = torch.utils.data.Subset(ActionDataset(CSV_PATH, label_map=base_dataset.label_map, is_training=True), train_indices)
-    val_dataset = torch.utils.data.Subset(ActionDataset(CSV_PATH, label_map=base_dataset.label_map, is_training=False), val_indices)
+    train_dataset = torch.utils.data.Subset(
+        ActionDataset(CSV_PATH, label_map=full_dataset.label_map, is_training=True), 
+        train_indices
+    )
+    val_dataset = torch.utils.data.Subset(
+        ActionDataset(CSV_PATH, label_map=full_dataset.label_map, is_training=False), 
+        val_indices
+    )
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
