@@ -3,17 +3,19 @@ import torch.nn as nn
 from torch.utils.data import Dataset
 import pandas as pd
 import numpy as np
+from collections import defaultdict
 from src.shared import WINDOW_SIZE, NUM_FEATURES
 
 
 class ActionDataset(Dataset):
     """
     PyTorch Dataset for loading skeleton keypoint sequences from CSV with on-the-fly kinematic augmentation.
+    Aggregates simultaneous action annotations into multi-hot binary vectors for multi-label classification.
     """
 
     def __init__(self, csv_file, label_map=None, is_training=False):
         """
-        Constructor. Loads CSV data and encodes text labels into integers.
+        Constructor. Loads CSV data, aggregates simultaneous actions, and encodes text labels into multi-hot vectors.
         :param csv_file: path to the dataset CSV file.
         :param label_map: dictionary mapping string labels to integer IDs. If None, it is generated automatically.
         :param is_training: boolean flag to enable anti-overfitting data augmentation during training passes.
@@ -29,11 +31,11 @@ class ActionDataset(Dataset):
         valid_indices = row_sums > 1e-5
 
         filtered_labels = raw_labels[valid_indices]
-        self.features = raw_features[valid_indices]
+        filtered_features = raw_features[valid_indices]
 
         dropped_count = len(raw_labels) - len(filtered_labels)
         if dropped_count > 0:
-            print(f"Dataset Sanitizer: Dropped {dropped_count} empty/invalid skeleton sequences out of {len(raw_labels)}, {len(filtered_labels)} remaining.")
+            print(f"Dataset Sanitizer: Dropped {dropped_count} empty/invalid skeleton sequences out of {len(raw_labels)}.")
 
         if label_map is None:
             unique_labels = sorted(list(set(filtered_labels)))
@@ -41,19 +43,37 @@ class ActionDataset(Dataset):
         else:
             self.label_map = label_map
 
-        self.labels = np.array([self.label_map[lbl] for lbl in filtered_labels], dtype=np.int64)
+        # Aggregate simultaneous action labels for identical timestamp windows:
+        sequence_groups = defaultdict(lambda: {"features": None, "labels": set()})
+        for lbl, feats in zip(filtered_labels, filtered_features):
+            if lbl in self.label_map:
+                feat_hash = feats.tobytes()
+                sequence_groups[feat_hash]["features"] = feats
+                sequence_groups[feat_hash]["labels"].add(self.label_map[lbl])
+
+        unique_features = []
+        multi_hot_labels = []
+        for group in sequence_groups.values():
+            unique_features.append(group["features"])
+            multi_hot = np.zeros(len(self.label_map), dtype=np.float32)
+            for idx in group["labels"]:
+                multi_hot[idx] = 1.0
+            multi_hot_labels.append(multi_hot)
+
+        self.features = np.array(unique_features, dtype=np.float32)
+        self.labels = np.array(multi_hot_labels, dtype=np.float32)
+        print(f"Dataset Sanitizer: Assembled {len(self.features)} unique multi-label sequences across {len(self.label_map)} classes.")
 
     def __len__(self):
         """
         Returns the total number of sequence samples in the dataset.
         :return: total number of sequence samples.
         """
-
         return len(self.labels)
 
     def _augment_sequence(self, sequence):
         """
-        Applies random kinematic jitter, amplitude scaling, spatial/temporal dropout, and anatomical horizontal mirroring to aggressively prevent overfitting.
+        Applies random kinematic jitter, amplitude scaling, spatial/temporal dropout, and anatomical horizontal mirroring.
         :param sequence: input sequence array of shape [WINDOW_SIZE, NUM_FEATURES].
         :return: augmented sequence array of shape [WINDOW_SIZE, NUM_FEATURES].
         """
@@ -64,7 +84,7 @@ class ActionDataset(Dataset):
         noise = np.random.normal(0.0, 0.01, sequence.shape).astype(np.float32)
         sequence += noise
 
-        # 50% Chance for Anatomical Horizontal Mirroring:
+        # 50% Chance for Anatomical Horizontal Mirroring (Instantly doubles training diversity for hand actions!):
         if np.random.rand() < 0.5:
             mirrored = sequence.copy()
             mirrored[:, 0:34:2] = -mirrored[:, 0:34:2]
@@ -94,12 +114,12 @@ class ActionDataset(Dataset):
         :param idx: sample index.
         :return: tuple of (sequence_tensor, label_tensor).
         """
-
         sequence = self.features[idx].reshape(WINDOW_SIZE, NUM_FEATURES)
         if self.is_training:
             sequence = self._augment_sequence(sequence)
 
-        return torch.tensor(sequence, dtype=torch.float32), torch.tensor(self.labels[idx], dtype=torch.long)
+        # Return float32 targets for BCEWithLogitsLoss:
+        return torch.tensor(sequence, dtype=torch.float32), torch.tensor(self.labels[idx], dtype=torch.float32)
 
 
 class TemporalAttention(nn.Module):
