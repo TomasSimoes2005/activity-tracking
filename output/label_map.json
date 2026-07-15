@@ -1,0 +1,10 @@
+{
+    "cellphone": 0,
+    "drink": 1,
+    "eat": 2,
+    "fall_floor": 3,
+    "lie_sleep": 4,
+    "sit": 5,
+    "smoke": 6,
+    "stand": 7
+}

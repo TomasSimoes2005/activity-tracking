@@ -9,7 +9,7 @@ from src.shared import WINDOW_SIZE, NUM_FEATURES
 
 class ActionDataset(Dataset):
     """
-    PyTorch Dataset for loading skeleton keypoint sequences from CSV with on-the-fly kinematic augmentation.
+    PyTorch Dataset for loading skeleton keypoint sequences from CSV with advanced non-linear temporal augmentation.
     Aggregates simultaneous action annotations into multi-hot binary vectors for multi-label classification.
     """
 
@@ -65,26 +65,36 @@ class ActionDataset(Dataset):
         print(f"Dataset Sanitizer: Assembled {len(self.features)} unique multi-label sequences across {len(self.label_map)} classes.")
 
     def __len__(self):
-        """
-        Returns the total number of sequence samples in the dataset.
-        :return: total number of sequence samples.
-        """
         return len(self.labels)
 
     def _augment_sequence(self, sequence):
         """
-        Applies random kinematic jitter, amplitude scaling, spatial/temporal dropout, and anatomical horizontal mirroring.
+        Applies random kinematic jitter, temporal elasticity (time warping), and anatomical mirroring.
         :param sequence: input sequence array of shape [WINDOW_SIZE, NUM_FEATURES].
         :return: augmented sequence array of shape [WINDOW_SIZE, NUM_FEATURES].
         """
 
-        scale_factor = np.random.uniform(0.90, 1.10)
+        scale_factor = np.random.uniform(0.95, 1.05)
         sequence = sequence * scale_factor
-
-        noise = np.random.normal(0.0, 0.01, sequence.shape).astype(np.float32)
+        noise = np.random.normal(0.0, 0.005, sequence.shape).astype(np.float32)
         sequence += noise
 
-        # 50% Chance for Anatomical Horizontal Mirroring (Instantly doubles training diversity for hand actions!):
+        # Stretches and compresses the action sequence to make the network robust to different motion speeds:
+        if np.random.rand() < 0.3:
+            orig_indices = np.arange(WINDOW_SIZE)
+            warp_magnitude = np.random.uniform(1.1, 2.0)
+            
+            # Create a non-linear curve to warp the time axis:
+            warp_curve = orig_indices + np.sin(orig_indices * np.pi / WINDOW_SIZE) * warp_magnitude
+            warp_curve = np.clip(warp_curve, 0, WINDOW_SIZE - 1)
+            warp_curve = np.sort(warp_curve)
+
+            warped_seq = np.zeros_like(sequence)
+            for i in range(NUM_FEATURES):
+                warped_seq[:, i] = np.interp(orig_indices, warp_curve, sequence[:, i])
+            sequence = warped_seq
+
+        # Anatomical Horizontal Mirroring:
         if np.random.rand() < 0.5:
             mirrored = sequence.copy()
             mirrored[:, 0:34:2] = -mirrored[:, 0:34:2]
@@ -96,29 +106,25 @@ class ActionDataset(Dataset):
                 mirrored[:, [ly, ry]] = mirrored[:, [ry, ly]]
             mirrored[:, [34, 35]] = mirrored[:, [35, 34]]
             mirrored[:, [36, 37]] = mirrored[:, [37, 36]]
+            mirrored[:, [42, 43]] = mirrored[:, [43, 42]]
+            mirrored[:, [44, 45]] = mirrored[:, [45, 44]]
             sequence = mirrored
 
-        if np.random.rand() < 0.5:
-            temporal_mask = np.random.rand(WINDOW_SIZE) > 0.10
+        if np.random.rand() < 0.2:
+            temporal_mask = np.random.rand(WINDOW_SIZE) > 0.05
             sequence = sequence * temporal_mask[:, np.newaxis]
 
-        if np.random.rand() < 0.5:
-            spatial_mask = np.random.rand(NUM_FEATURES) > 0.05
+        if np.random.rand() < 0.2:
+            spatial_mask = np.random.rand(NUM_FEATURES) > 0.02
             sequence = sequence * spatial_mask[np.newaxis, :]
 
         return sequence
 
     def __getitem__(self, idx):
-        """
-        Retrieves, reshapes, and optionally augments a single sequence sample.
-        :param idx: sample index.
-        :return: tuple of (sequence_tensor, label_tensor).
-        """
         sequence = self.features[idx].reshape(WINDOW_SIZE, NUM_FEATURES)
         if self.is_training:
             sequence = self._augment_sequence(sequence)
 
-        # Return float32 targets for BCEWithLogitsLoss:
         return torch.tensor(sequence, dtype=torch.float32), torch.tensor(self.labels[idx], dtype=torch.float32)
 
 
@@ -126,7 +132,6 @@ class TemporalAttention(nn.Module):
     """
     Lightweight Temporal Self-Attention layer. Automatically weights critical movement frames over static background frames.
     """
-
     def __init__(self, hidden_size):
         super(TemporalAttention, self).__init__()
         self.attention = nn.Sequential(
@@ -136,10 +141,6 @@ class TemporalAttention(nn.Module):
         )
 
     def forward(self, gru_output):
-        """
-        :param gru_output: tensor of shape [batch_size, sequence_length, hidden_size * 2].
-        :return: context vector of shape [batch_size, hidden_size * 2].
-        """
         attn_weights = torch.softmax(self.attention(gru_output), dim=1)
         context = torch.sum(gru_output * attn_weights, dim=1)
         return context
@@ -148,22 +149,15 @@ class TemporalAttention(nn.Module):
 class ActionHybridNet(nn.Module):
     """
     Hybrid Kinematic 1D-CNN + Bidirectional GRU + Temporal Attention network for action recognition.
-    Automatically calculates 1st-order velocity derivatives on-the-fly during the forward pass.
+    Safely calculates and masks kinematic derivatives to prevent YOLO outlier spikes.
     """
 
     def __init__(self, input_size=NUM_FEATURES, hidden_size=64, num_layers=2, num_classes=10, dropout=0.3):
-        """
-        Constructor.
-        :param input_size: number of features per frame.
-        :param hidden_size: internal GRU and convolutional channel hidden dimension.
-        :param num_layers: number of stacked Bidirectional GRU layers.
-        :param num_classes: number of output action categories.
-        :param dropout: dropout probability to prevent overfitting.
-        """
-
         super(ActionHybridNet, self).__init__()
 
-        # Multiply input_size by 2 because we concatenate raw coordinates with calculated frame-to-frame velocity:
+        # Temporal Smoother to kill minor YOLO keypoint jitter:
+        self.smoother = nn.AvgPool1d(kernel_size=3, stride=1, padding=1)
+
         self.conv1d = nn.Conv1d(in_channels=input_size * 2, out_channels=hidden_size, kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm1d(hidden_size)
         self.relu = nn.ReLU()
@@ -178,9 +172,7 @@ class ActionHybridNet(nn.Module):
             dropout=dropout if num_layers > 1 else 0.0
         )
 
-        # Temporal Attention Mechanism replaces static end-frame slicing:
         self.attn = TemporalAttention(hidden_size)
-
         self.fc1 = nn.Linear(hidden_size * 2, hidden_size)
         self.bn2 = nn.BatchNorm1d(hidden_size)
         self.dropout_fc = nn.Dropout(dropout)
@@ -188,36 +180,37 @@ class ActionHybridNet(nn.Module):
 
     def forward(self, x):
         """
-        Forward pass with native kinematic derivative calculation.
-        :param x: input tensor of shape [batch_size, WINDOW_SIZE, NUM_FEATURES].
-        :return: class logits tensor of shape [batch_size, num_classes].
+        Forward pass with YOLO Outlier Rejection.
         """
+        # 1. Create a binary validity mask. Missing YOLO points manifest as exactly 0.0
+        # This mask prevents dropped frames from generating fake velocity spikes.
+        valid_mask = (torch.abs(x) > 1e-5).float()
 
-        # 1. Calculate 1st-order temporal velocity natively on GPU: v(t) = p(t) - p(t-1)
-        velocity = x[:, 1:, :] - x[:, :-1, :]
-        first_frame_vel = torch.zeros_like(x[:, :1, :])
+        # 2. Smooth the raw sequence:
+        x_smooth = self.smoother(x.transpose(1, 2)).transpose(1, 2)
+
+        # 3. Calculate raw velocity: v(t) = p(t) - p(t-1)
+        velocity = x_smooth[:, 1:, :] - x_smooth[:, :-1, :]
+        first_frame_vel = torch.zeros_like(x_smooth[:, :1, :])
         velocity = torch.cat([first_frame_vel, velocity], dim=1)
 
-        # Concatenate positions and velocities -> Shape: [batch_size, WINDOW_SIZE, NUM_FEATURES * 2]:
+        # 4. ZERO-MASKING: Flatten artificial velocity spikes caused by dropped keypoints:
+        velocity = velocity * valid_mask
+
+        # Concatenate positions and clean velocities -> Shape: [batch, WINDOW_SIZE, NUM_FEATURES * 2]:
         x_dynamic = torch.cat([x, velocity], dim=-1)
 
-        # Conv1d expects shape [batch_size, channels, sequence_length]:
         x_in = x_dynamic.transpose(1, 2)
         x_in = self.conv1d(x_in)
         x_in = self.bn1(x_in)
         x_in = self.relu(x_in)
         x_in = self.dropout_cnn(x_in)
 
-        # Restore shape for GRU [batch_size, sequence_length, channels]:
         x_in = x_in.transpose(1, 2)
 
-        # Pass through Bidirectional GRU:
         out, _ = self.bigru(x_in)
-
-        # Apply Temporal Attention to dynamically weight the most active movement frames:
         out = self.attn(out)
 
-        # Classification head:
         out = self.fc1(out)
         out = self.bn2(out)
         out = self.relu(out)

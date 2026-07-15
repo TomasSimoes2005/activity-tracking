@@ -5,15 +5,15 @@ import numpy as np
 WINDOW_SIZE = 30
 
 # Total number of extracted features per frame:
-NUM_FEATURES = 42
+NUM_FEATURES = 46
 
 
 def extract_features(keypoints, bbox):
     """
-    Extracts 42 features per frame: 34 anatomically normalized coordinates + 8 orientation/kinematic metrics.
+    Extracts 46 features per frame: 34 anatomically normalized coordinates + 12 orientation/kinematic metrics.
     :param keypoints: keypoint data.
     :param bbox: bounding box data.
-    :return: enriched feature list of length 42.
+    :return: enriched feature list of length 46.
     """
 
     # Extract values:
@@ -44,14 +44,20 @@ def extract_features(keypoints, bbox):
     nose_x, nose_y = keypoints[0]
     le_x, le_y = keypoints[1]  # Left eye
     re_x, re_y = keypoints[2]  # Right eye
+    lear_x, lear_y = keypoints[3] # Left ear
+    rear_x, rear_y = keypoints[4] # Right ear
     lw_x, lw_y = keypoints[9]  # Left wrist
     rw_x, rw_y = keypoints[10]  # Right wrist
 
     # Wrist-to-nose Euclidean Distance:
-    lw_to_nose = np.sqrt((lw_x - nose_x) ** 2 + (lw_y - nose_y) ** 2) / anatomical_scale if (
-                lw_x > 0 and nose_x > 0) else 0.0
-    rw_to_nose = np.sqrt((rw_x - nose_x) ** 2 + (rw_y - nose_y) ** 2) / anatomical_scale if (
-                rw_x > 0 and nose_x > 0) else 0.0
+    lw_to_nose = np.sqrt((lw_x - nose_x) ** 2 + (lw_y - nose_y) ** 2) / anatomical_scale if (lw_x > 0 and nose_x > 0) else 0.0
+    rw_to_nose = np.sqrt((rw_x - nose_x) ** 2 + (rw_y - nose_y) ** 2) / anatomical_scale if (rw_x > 0 and nose_x > 0) else 0.0
+
+    # Ear distances:
+    lw_to_lear = np.sqrt((lw_x - lear_x) ** 2 + (lw_y - lear_y) ** 2) / anatomical_scale if (lw_x > 0 and lear_x > 0) else 0.0
+    rw_to_rear = np.sqrt((rw_x - rear_x) ** 2 + (rw_y - rear_y) ** 2) / anatomical_scale if (rw_x > 0 and rear_x > 0) else 0.0
+    lw_to_rear = np.sqrt((lw_x - rear_x) ** 2 + (lw_y - rear_y) ** 2) / anatomical_scale if (lw_x > 0 and rear_x > 0) else 0.0
+    rw_to_lear = np.sqrt((rw_x - lear_x) ** 2 + (rw_y - lear_y) ** 2) / anatomical_scale if (rw_x > 0 and lear_x > 0) else 0.0
 
     # Wrist vertical elevation relative to shoulders:
     avg_shoulder_y = (ls_y + rs_y) / 2.0 if (ls_y > 0 and rs_y > 0) else y1
@@ -86,7 +92,8 @@ def extract_features(keypoints, bbox):
 
     return norm_kpts + [
         lw_to_nose, rw_to_nose, lw_elevation, rw_elevation,
-        profile_ratio, head_tilt, inter_wrist_dist, min_wrist_to_chest
+        profile_ratio, head_tilt, inter_wrist_dist, min_wrist_to_chest,
+        lw_to_lear, rw_to_rear, lw_to_rear, rw_to_lear
     ]
 
 

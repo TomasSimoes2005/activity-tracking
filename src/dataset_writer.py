@@ -41,7 +41,9 @@ class DatasetWriter:
                         f"f{f_idx}_lw_dist", f"f{f_idx}_rw_dist",
                         f"f{f_idx}_lw_elev", f"f{f_idx}_rw_elev",
                         f"f{f_idx}_prof_ratio", f"f{f_idx}_head_tilt",
-                        f"f{f_idx}_inter_wrist", f"f{f_idx}_chest_dist"
+                        f"f{f_idx}_inter_wrist", f"f{f_idx}_chest_dist",
+                        f"f{f_idx}_lw_lear", f"f{f_idx}_rw_rear",
+                        f"f{f_idx}_lw_rear", f"f{f_idx}_rw_lear"
                     ])
                 writer.writerow(header)
 

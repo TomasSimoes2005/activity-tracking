@@ -271,8 +271,7 @@ def download_dataset(csv_list, output_dir="input/ava_kinetics/videos", videos_pe
         print("[Auth] Using local cookies.txt file for authentication...")
         ydl_opts['cookiesfromfile'] = 'cookies.txt'
     else:
-        # NOTE: Change 'chrome' to 'firefox', 'edge', or 'brave' if you use a different browser!
-        print("[Auth] cookies.txt not found! Attempting live cookie extraction from Chrome...")
+        print("[Auth] cookies.txt not found! Attempting live cookie extraction from the browser...")
         ydl_opts['cookiesfrombrowser'] = ('edge', )
 
     print(f"\nLaunching parallel download pool across {MAX_WORKERS} concurrent category workers...\n")

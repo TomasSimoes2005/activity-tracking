@@ -43,7 +43,7 @@ def scan_optimal_thresholds(y_true, y_pred_probs, label_map):
         class_true = y_true[:, idx]
         class_probs = y_pred_probs[:, idx]
 
-        # Scan all 81 candidate thresholds for this specific action class:
+        # Scan all candidate thresholds for this specific action class:
         for thresh in threshold_range:
             class_pred = (class_probs >= thresh).astype(np.int32)
             prec, rec, f1, _ = precision_recall_fscore_support(class_true, class_pred, average='binary', zero_division=0)
