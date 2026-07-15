@@ -19,10 +19,8 @@ MAX_WORKERS = 6
 TARGET_AVA_CLASSES = {
     5: "fall_floor",
     8: "lie_sleep",
-    10: "run",
     11: "sit",
     12: "stand",
-    14: "walk",
     27: "drink",
     29: "eat",
     54: "smoke",

@@ -11,9 +11,9 @@ from src.shared import WINDOW_SIZE, NUM_FEATURES
 BATCH_SIZE = 32
 LEARNING_RATE = 0.001
 EPOCHS = 60
-CSV_PATH = "output/hmdb51.csv"
-MODEL_SAVE_PATH = "output/action_gru.pth"
-ONNX_SAVE_PATH = "output/action_gru.onnx"
+CSV_PATH = "output/ava_dataset.csv"
+MODEL_SAVE_PATH = "output/model.pth"
+ONNX_SAVE_PATH = "output/model.onnx"
 LABEL_MAP_PATH = "output/label_map.json"
 
 
