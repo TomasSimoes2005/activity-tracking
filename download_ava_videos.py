@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 TARGET_CLASSES = [5, 8, 11, 12, 27, 29, 54, 57]
 
 # Concurrency level (kept low to avoid YouTube IP rate-limiting):
-MAX_WORKERS = 4
+MAX_WORKERS = 2  # Lowered to 2 to prevent triggering YouTube bot detection algorithms
 
 # Valid video container formats downloaded by yt-dlp:
 VALID_EXTS = ('.mp4', '.webm', '.mkv', '.avi')
@@ -56,6 +56,7 @@ def init_blacklist(output_dir="input/ava_kinetics/videos", blacklist_path="dead_
     print(f"[Init] Total Treated IDs assembled in RAM (will be instantly skipped): {len(treated_ids)}\n")
 
     return treated_ids, disk_ids
+
 
 def add_to_blacklist(vid, blacklist_path="dead_links.json"):
     """
@@ -122,7 +123,6 @@ def _download_class_worker(action_id, class_vids, treated_ids, verified_count, t
         print(f"[Class {action_id} | {verified_count+1}/{target}] Fetching -> {vid} ...")
 
         try:
-
             # Instantiate a fresh session per video to prevent error state bleeding:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
@@ -139,21 +139,38 @@ def _download_class_worker(action_id, class_vids, treated_ids, verified_count, t
         except yt_dlp.utils.DownloadError as e:
             error_msg = str(e).lower()
 
-            # If YouTube is rate-limiting or throttling:
-            transient_keywords = [
+            # 1. Bot detection and IP throttling (Trigger Adaptive Cool-down):
+            bot_keywords = [
+                "confirm you’re not a bot",
+                "confirm you're not a bot",
                 "rate-limited",
                 "try again later",
                 "too many requests",
                 "429",
-                "bot",
                 "captcha",
                 "challenge",
             ]
-            if any(tk in error_msg for tk in transient_keywords):
-                print(f"[Class {action_id}] Rate-limit / Throttling hit -> Skipping WITHOUT blacklisting: {vid}")
+            if any(bk in error_msg for bk in bot_keywords):
+                cooldown = random.uniform(15.0, 25.0)
+                print(f"[Class {action_id}] Bot detection hit! Pausing thread for {cooldown:.1f}s to cool down IP -> {vid}")
+                time.sleep(cooldown)
                 continue
 
-            # Use strict full-length phrases to avoid rate-limit collisions:
+            # 2. Age restrictions and missing authentication (Requires browser login):
+            auth_keywords = [
+                "sign in to confirm your age",
+                "please sign in",
+                "inappropriate for some users",
+                "requires authentication",
+                "members-only"
+            ]
+            if any(ak in error_msg for ak in auth_keywords):
+                print(f"[Class {action_id}] Auth / Age-gate blocked -> Blacklisting to prevent endless retry loops: {vid}")
+                treated_ids.add(vid)
+                add_to_blacklist(vid)
+                continue
+
+            # 3. Use strict full-length phrases to avoid rate-limit collisions:
             fatal_keywords = [
                 "private",
                 "terminated",
@@ -176,8 +193,8 @@ def _download_class_worker(action_id, class_vids, treated_ids, verified_count, t
             else:
                 print(f"[Class {action_id}] Unrecognized transient error -> Skipping for now: {vid}")
 
-        # Tiny randomized sleep to prevent multi-threaded request flooding against YouTube servers:
-        time.sleep(random.uniform(0.7, 1.5))
+        # Increased sleep intervals to prevent multi-threaded request flooding against YouTube servers:
+        time.sleep(random.uniform(2.5, 4.5))
 
     print(f"[Worker -> Class {action_id}] Finished! Total videos ready: {verified_count}/{target}")
     return verified_count
@@ -229,11 +246,10 @@ def download_dataset(csv_list, output_dir="input/ava_kinetics/videos", videos_pe
     df = df.drop_duplicates(subset=["action_id", "video_id"])
     print(f"Master pool assembled! Total unique action-to-video mappings available: {len(df)}")
 
-    # Set downloader options with multi-client fallback chain:
+    # Set downloader options with browser authentication fallback:
     ydl_opts = {
         'format': 'best[height<=480]/bestvideo[height<=480]/best',
         'outtmpl': os.path.join(output_dir, '%(id)s.%(ext)s'),
-        'cookiesfromfile': 'cookies.txt',
         'quiet': True,
         'no_warnings': True,
         'ignoreerrors': False,
@@ -245,10 +261,19 @@ def download_dataset(csv_list, output_dir="input/ava_kinetics/videos", videos_pe
                 'player_client': ['ios', 'android', 'tv_embedded', 'web']
             }
         },
-        'sleep_interval': 2,
-        'max_sleep_interval': 7,
-        'sleep_interval_requests': 1.5
+        'sleep_interval': 3,
+        'max_sleep_interval': 8,
+        'sleep_interval_requests': 2.0
     }
+
+    # Automatically use browser cookies if cookies.txt is missing:
+    if os.path.exists('cookies.txt'):
+        print("[Auth] Using local cookies.txt file for authentication...")
+        ydl_opts['cookiesfromfile'] = 'cookies.txt'
+    else:
+        # NOTE: Change 'chrome' to 'firefox', 'edge', or 'brave' if you use a different browser!
+        print("[Auth] cookies.txt not found! Attempting live cookie extraction from Chrome...")
+        ydl_opts['cookiesfrombrowser'] = ('edge', )
 
     print(f"\nLaunching parallel download pool across {MAX_WORKERS} concurrent category workers...\n")
 

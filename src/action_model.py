@@ -19,37 +19,28 @@ class ActionDataset(Dataset):
         :param is_training: boolean flag to enable anti-overfitting data augmentation during training passes.
         """
 
-        # Save args:
         self.is_training = is_training
-
-        # Load CSV:
         self.data = pd.read_csv(csv_file)
 
-        # Extract raw text labels and numerical features:
         raw_labels = self.data.iloc[:, 0].values
         raw_features = self.data.iloc[:, 1:].values.astype(np.float32)
 
-        # If a row is purely 0.0, its sum will be 0 (we only keep rows with actual movement/posture):
         row_sums = np.sum(np.abs(raw_features), axis=1)
         valid_indices = row_sums > 1e-5
 
-        # Apply the filter to drop the dead rows from memory:
         filtered_labels = raw_labels[valid_indices]
         self.features = raw_features[valid_indices]
 
-        # Calculate how many garbage rows were removed:
         dropped_count = len(raw_labels) - len(filtered_labels)
         if dropped_count > 0:
             print(f"Dataset Sanitizer: Dropped {dropped_count} empty/invalid skeleton sequences out of {len(raw_labels)}, {len(filtered_labels)} remaining.")
 
-        # Create or use existing label mapping:
         if label_map is None:
             unique_labels = sorted(list(set(filtered_labels)))
             self.label_map = {label: idx for idx, label in enumerate(unique_labels)}
         else:
             self.label_map = label_map
 
-        # Encode labels to integers:
         self.labels = np.array([self.label_map[lbl] for lbl in filtered_labels], dtype=np.int64)
 
     def __len__(self):
@@ -62,25 +53,35 @@ class ActionDataset(Dataset):
 
     def _augment_sequence(self, sequence):
         """
-        Applies random kinematic jitter, amplitude scaling, and spatial/temporal dropout to aggressively prevent overfitting on small/medium datasets.
+        Applies random kinematic jitter, amplitude scaling, spatial/temporal dropout, and anatomical horizontal mirroring to aggressively prevent overfitting.
         :param sequence: input sequence array of shape [WINDOW_SIZE, NUM_FEATURES].
         :return: augmented sequence array of shape [WINDOW_SIZE, NUM_FEATURES].
         """
 
-        # Random amplitude scaling (simulates different body sizes and camera distances):
         scale_factor = np.random.uniform(0.90, 1.10)
         sequence = sequence * scale_factor
 
-        # Random coordinate jitter (simulates ByteTrack bounding box and sensor noise):
         noise = np.random.normal(0.0, 0.01, sequence.shape).astype(np.float32)
         sequence += noise
 
-        # Temporal masking / frame dropout (50% chance to apply):
+        # 50% Chance for Anatomical Horizontal Mirroring:
+        if np.random.rand() < 0.5:
+            mirrored = sequence.copy()
+            mirrored[:, 0:34:2] = -mirrored[:, 0:34:2]
+            swap_pairs = [(1, 2), (3, 4), (5, 6), (7, 8), (9, 10), (11, 12), (13, 14), (15, 16)]
+            for left_idx, right_idx in swap_pairs:
+                lx, ly = left_idx * 2, (left_idx * 2) + 1
+                rx, ry = right_idx * 2, (right_idx * 2) + 1
+                mirrored[:, [lx, rx]] = mirrored[:, [rx, lx]]
+                mirrored[:, [ly, ry]] = mirrored[:, [ry, ly]]
+            mirrored[:, [34, 35]] = mirrored[:, [35, 34]]
+            mirrored[:, [36, 37]] = mirrored[:, [37, 36]]
+            sequence = mirrored
+
         if np.random.rand() < 0.5:
             temporal_mask = np.random.rand(WINDOW_SIZE) > 0.10
             sequence = sequence * temporal_mask[:, np.newaxis]
 
-        # Spatial masking / keypoint dropout (50% chance to apply):
         if np.random.rand() < 0.5:
             spatial_mask = np.random.rand(NUM_FEATURES) > 0.05
             sequence = sequence * spatial_mask[np.newaxis, :]
@@ -94,19 +95,40 @@ class ActionDataset(Dataset):
         :return: tuple of (sequence_tensor, label_tensor).
         """
 
-        # Reshape flattened features into [WINDOW_SIZE frames, NUM_FEATURES coordinates]:
         sequence = self.features[idx].reshape(WINDOW_SIZE, NUM_FEATURES)
-
-        # Apply augmentation only during training passes:
         if self.is_training:
             sequence = self._augment_sequence(sequence)
 
         return torch.tensor(sequence, dtype=torch.float32), torch.tensor(self.labels[idx], dtype=torch.long)
 
 
+class TemporalAttention(nn.Module):
+    """
+    Lightweight Temporal Self-Attention layer. Automatically weights critical movement frames over static background frames.
+    """
+
+    def __init__(self, hidden_size):
+        super(TemporalAttention, self).__init__()
+        self.attention = nn.Sequential(
+            nn.Linear(hidden_size * 2, hidden_size // 2),
+            nn.Tanh(),
+            nn.Linear(hidden_size // 2, 1)
+        )
+
+    def forward(self, gru_output):
+        """
+        :param gru_output: tensor of shape [batch_size, sequence_length, hidden_size * 2].
+        :return: context vector of shape [batch_size, hidden_size * 2].
+        """
+        attn_weights = torch.softmax(self.attention(gru_output), dim=1)
+        context = torch.sum(gru_output * attn_weights, dim=1)
+        return context
+
+
 class ActionHybridNet(nn.Module):
     """
-    Hybrid 1D-CNN + Bidirectional GRU network for temporal action recognition.
+    Hybrid Kinematic 1D-CNN + Bidirectional GRU + Temporal Attention network for action recognition.
+    Automatically calculates 1st-order velocity derivatives on-the-fly during the forward pass.
     """
 
     def __init__(self, input_size=NUM_FEATURES, hidden_size=64, num_layers=2, num_classes=10, dropout=0.3):
@@ -121,13 +143,12 @@ class ActionHybridNet(nn.Module):
 
         super(ActionHybridNet, self).__init__()
 
-        # 1D Temporal Convolution (Extracts sharp velocity/acceleration transitions across neighboring frames):
-        self.conv1d = nn.Conv1d(in_channels=input_size, out_channels=hidden_size, kernel_size=3, padding=1)
+        # Multiply input_size by 2 because we concatenate raw coordinates with calculated frame-to-frame velocity:
+        self.conv1d = nn.Conv1d(in_channels=input_size * 2, out_channels=hidden_size, kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm1d(hidden_size)
         self.relu = nn.ReLU()
         self.dropout_cnn = nn.Dropout(dropout)
 
-        # Bidirectional GRU (Scans forward and backward over extracted motion maps):
         self.bigru = nn.GRU(
             input_size=hidden_size,
             hidden_size=hidden_size,
@@ -137,7 +158,9 @@ class ActionHybridNet(nn.Module):
             dropout=dropout if num_layers > 1 else 0.0
         )
 
-        # Fully connected classification head (hidden_size * 2 due to bidirectional concatenation):
+        # Temporal Attention Mechanism replaces static end-frame slicing:
+        self.attn = TemporalAttention(hidden_size)
+
         self.fc1 = nn.Linear(hidden_size * 2, hidden_size)
         self.bn2 = nn.BatchNorm1d(hidden_size)
         self.dropout_fc = nn.Dropout(dropout)
@@ -145,26 +168,34 @@ class ActionHybridNet(nn.Module):
 
     def forward(self, x):
         """
-        Forward pass.
+        Forward pass with native kinematic derivative calculation.
         :param x: input tensor of shape [batch_size, WINDOW_SIZE, NUM_FEATURES].
         :return: class logits tensor of shape [batch_size, num_classes].
         """
 
+        # 1. Calculate 1st-order temporal velocity natively on GPU: v(t) = p(t) - p(t-1)
+        velocity = x[:, 1:, :] - x[:, :-1, :]
+        first_frame_vel = torch.zeros_like(x[:, :1, :])
+        velocity = torch.cat([first_frame_vel, velocity], dim=1)
+
+        # Concatenate positions and velocities -> Shape: [batch_size, WINDOW_SIZE, NUM_FEATURES * 2]:
+        x_dynamic = torch.cat([x, velocity], dim=-1)
+
         # Conv1d expects shape [batch_size, channels, sequence_length]:
-        x = x.transpose(1, 2)
-        x = self.conv1d(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        x = self.dropout_cnn(x)
+        x_in = x_dynamic.transpose(1, 2)
+        x_in = self.conv1d(x_in)
+        x_in = self.bn1(x_in)
+        x_in = self.relu(x_in)
+        x_in = self.dropout_cnn(x_in)
 
         # Restore shape for GRU [batch_size, sequence_length, channels]:
-        x = x.transpose(1, 2)
+        x_in = x_in.transpose(1, 2)
 
         # Pass through Bidirectional GRU:
-        out, _ = self.bigru(x)
+        out, _ = self.bigru(x_in)
 
-        # Extract both forward and backward final temporal states:
-        out = out[:, -1, :]
+        # Apply Temporal Attention to dynamically weight the most active movement frames:
+        out = self.attn(out)
 
         # Classification head:
         out = self.fc1(out)

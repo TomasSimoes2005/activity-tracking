@@ -1,11 +1,13 @@
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 import json
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 from src.action_model import ActionDataset, ActionHybridNet
 from src.shared import WINDOW_SIZE, NUM_FEATURES
+from src.metrics import evaluate_multilabel_metrics
 
 # Hyperparameters:
 BATCH_SIZE = 32
@@ -33,7 +35,6 @@ def train():
         return
     full_dataset = ActionDataset(CSV_PATH, is_training=False)
     num_classes = len(full_dataset.label_map)
-    print(f"Loaded {len(full_dataset)} valid sequences across {num_classes} classes.")
 
     with open(LABEL_MAP_PATH, "w") as f:
         json.dump(full_dataset.label_map, f, indent=4)
@@ -57,18 +58,32 @@ def train():
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
-    # Initialize Hybrid Net, Smooth Loss, and Optimizer:
+    # Initialize Hybrid Net:
     model = ActionHybridNet(input_size=NUM_FEATURES, hidden_size=64, num_layers=2, num_classes=num_classes).to(device)
 
-    # Label Smoothing prevents overconfidence on noisy academic movie cuts:
-    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+    # Calculate class counts:
+    pos_counts = full_dataset.labels.sum(axis=0)
+    total_samples = len(full_dataset)
+    pos_counts = np.maximum(pos_counts, 1.0)
+
+    # Get class weights:
+    raw_weights = (total_samples - pos_counts) / pos_counts
+    dampened_weights = np.sqrt(raw_weights)
+    pos_weight = torch.tensor(dampened_weights, dtype=torch.float32).to(device)
+    print("\n--- Dampened Positive Class Weights (Sqrt) ---")
+    for name, idx in full_dataset.label_map.items():
+        print(f"[{name.upper()}]: {pos_weight[idx]:.2f}x penalty for misses")
+    print("-" * 46)
+
+    # Pass pos_weight directly into BCEWithLogitsLoss:
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
 
     # Cosine Annealing smoothly decays learning rate to prevent plateauing:
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-5)
 
-    best_val_acc = 0.0
-    print("\nStarting Training Loop...")
+    best_val_loss = float('inf')
+    print("\nStarting Multi-Label Training Loop...")
 
     for epoch in range(EPOCHS):
         model.train()
@@ -91,15 +106,15 @@ def train():
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
-            # Track metrics:
+            # Track metrics using a 0.5 probability threshold:
             train_loss += loss.item() * sequences.size(0)
-            _, predicted = torch.max(outputs.data, 1)
-            total_train += labels.size(0)
-            correct_train += (predicted == labels).sum().item()
+            predicted_binary = (torch.sigmoid(outputs.data) > 0.5).float()
+            total_train += labels.numel()
+            correct_train += (predicted_binary == labels).sum().item()
 
         scheduler.step()
 
-        epoch_train_loss = train_loss / total_train
+        epoch_train_loss = train_loss / len(train_dataset)
         epoch_train_acc = (correct_train / total_train) * 100.0
 
         # Validation pass:
@@ -115,24 +130,24 @@ def train():
                 loss = criterion(outputs, labels)
 
                 val_loss += loss.item() * sequences.size(0)
-                _, predicted = torch.max(outputs.data, 1)
-                total_val += labels.size(0)
-                correct_val += (predicted == labels).sum().item()
+                predicted_binary = (torch.sigmoid(outputs.data) > 0.5).float()
+                total_val += labels.numel()
+                correct_val += (predicted_binary == labels).sum().item()
 
-        epoch_val_loss = val_loss / total_val
+        epoch_val_loss = val_loss / len(val_dataset)
         epoch_val_acc = (correct_val / total_val) * 100.0
 
         print(f"Epoch [{epoch + 1:02d}/{EPOCHS:02d}] | "
-              f"Train Loss: {epoch_train_loss:.4f} - Acc: {epoch_train_acc:.2f}% | "
-              f"Val Loss: {epoch_val_loss:.4f} - Acc: {epoch_val_acc:.2f}% | "
+              f"Train Loss: {epoch_train_loss:.4f} - Bin Acc: {epoch_train_acc:.2f}% | "
+              f"Val Loss: {epoch_val_loss:.4f} - Bin Acc: {epoch_val_acc:.2f}% | "
               f"LR: {scheduler.get_last_lr()[0]:.6f}")
 
-        # Save best model checkpoint:
-        if epoch_val_acc > best_val_acc:
-            best_val_acc = epoch_val_acc
+        # Save best model checkpoint based on lowest validation loss:
+        if epoch_val_loss < best_val_loss:
+            best_val_loss = epoch_val_loss
             torch.save(model.state_dict(), MODEL_SAVE_PATH)
 
-    print(f"\nTraining Complete! Best Validation Accuracy: {best_val_acc:.2f}%")
+    print(f"\nTraining Complete! Best Validation Loss: {best_val_loss:.4f}")
     print(f"Model saved to: {MODEL_SAVE_PATH}")
 
     # ONNX export:
@@ -147,13 +162,43 @@ def train():
         dummy_input,
         ONNX_SAVE_PATH,
         export_params=True,
-        opset_version=12,
+        opset_version=18,
         do_constant_folding=True,
         input_names=['input_sequence'],
         output_names=['action_logits'],
         dynamic_axes={'input_sequence': {0: 'batch_size'}, 'action_logits': {0: 'batch_size'}}
     )
     print(f"ONNX Model successfully exported to: {ONNX_SAVE_PATH}")
+
+    print("\nRunning Full Metric Evaluation on Best Saved Checkpoint...")
+    model.load_state_dict(torch.load(MODEL_SAVE_PATH))
+    model.eval()
+
+    all_val_targets = []
+    all_val_preds = []
+
+    with torch.no_grad():
+        for sequences, labels in val_loader:
+            sequences = sequences.to(device)
+            outputs = model(sequences)
+            
+            # Apply sigmoid to extract raw probabilities:
+            probs = torch.sigmoid(outputs).cpu().numpy()
+            
+            all_val_preds.append(probs)
+            all_val_targets.append(labels.numpy())
+
+    # Concatenate batches into full dataset matrices:
+    y_true_matrix = np.vstack(all_val_targets)
+    y_pred_matrix = np.vstack(all_val_preds)
+
+    # Calculate and print all precision, recall, mAP, and F-scores:
+    evaluate_multilabel_metrics(
+        y_true=y_true_matrix,
+        y_pred_probs=y_pred_matrix,
+        label_map=full_dataset.label_map,
+        threshold=0.35
+    )
 
 
 if __name__ == "__main__":

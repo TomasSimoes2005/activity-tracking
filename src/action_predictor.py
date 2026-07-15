@@ -100,7 +100,7 @@ class ActionPredictor:
 
     def predict_top_k(self, track_id, keypoints, bbox, k=5, is_last_frame=False, min_frames=10):
         """
-        Normalizes frame keypoints, updates the rolling buffer, and returns the top K action predictions.
+        Normalizes frame keypoints, updates the rolling buffer, and returns the top K action predictions using Sigmoid probabilities.
         If is_last_frame is True and the buffer has between min_frames and window_size, it applies Edge Padding.
         :param track_id: id of the person.
         :param keypoints: keypoint data.
@@ -134,9 +134,8 @@ class ActionPredictor:
             # Run ONNX inference:
             logits = self.session.run(None, {self.input_name: input_sequence})[0][0]
 
-            # Compute softmax probabilities:
-            exp_logits = np.exp(logits - np.max(logits))
-            probabilities = exp_logits / np.sum(exp_logits)
+            # Compute independent Sigmoid probabilities for multi-label inference:
+            probabilities = 1.0 / (1.0 + np.exp(-logits))
 
             # Get indices of the top K highest probabilities (sorted descending):
             top_k_indices = np.argsort(probabilities)[::-1][:k]
@@ -152,4 +151,57 @@ class ActionPredictor:
             return top_k_results
 
         # If buffer is still filling up (< 30 frames), return cached list or buffering string:
+        return self.track_labels.get(track_id, f"BUFFERING ({len(self.track_buffers[track_id])}/{self.window_size})")
+
+    def predict_multi_label(self, track_id, keypoints, bbox, default_threshold=0.40, custom_thresholds=None, is_last_frame=False, min_frames=10):
+        """
+        Normalizes frame keypoints, updates rolling buffer, and returns ALL simultaneous actions exceeding per-class thresholds.
+        :param track_id: id of the person.
+        :param keypoints: keypoint data.
+        :param bbox: bounding box data.
+        :param default_threshold: fallback minimum sigmoid probability if custom threshold is missing.
+        :param custom_thresholds: dictionary mapping class label strings to specific optimal float thresholds.
+        :param is_last_frame: boolean flag indicating if this is the final frame of the video/clip.
+        :param min_frames: minimum required frames to justify padding and predicting.
+        :return: list of tuples [(label_str, probability_float), ...] sorted by confidence, or buffering status string.
+        """
+
+        if self.session is None:
+            return "NO MODEL"
+
+        norm_kpts = self._extract_enriched_features(keypoints, bbox)
+        self.track_buffers[track_id].append(norm_kpts)
+
+        if is_last_frame and min_frames <= len(self.track_buffers[track_id]) < self.window_size:
+            last_pose = self.track_buffers[track_id][-1]
+            while len(self.track_buffers[track_id]) < self.window_size:
+                self.track_buffers[track_id].append(last_pose)
+
+        if len(self.track_buffers[track_id]) == self.window_size:
+            input_sequence = np.array(self.track_buffers[track_id], dtype=np.float32).reshape(1, self.window_size, NUM_FEATURES)
+            logits = self.session.run(None, {self.input_name: input_sequence})[0][0]
+
+            probabilities = 1.0 / (1.0 + np.exp(-logits))
+
+            active_actions = []
+            for idx, prob in enumerate(probabilities):
+                label_str = self.idx_to_label.get(idx, "UNKNOWN")
+                
+                # Check if we have an optimal custom threshold for this specific class:
+                thresh = default_threshold
+                if custom_thresholds and label_str in custom_thresholds:
+                    thresh = custom_thresholds[label_str]
+
+                if prob >= thresh:
+                    active_actions.append((label_str, float(prob)))
+
+            active_actions.sort(key=lambda x: x[1], reverse=True)
+
+            if not active_actions:
+                best_idx = np.argmax(probabilities)
+                active_actions = [(self.idx_to_label.get(best_idx, "UNKNOWN"), float(probabilities[best_idx]))]
+
+            self.track_labels[track_id] = active_actions
+            return active_actions
+
         return self.track_labels.get(track_id, f"BUFFERING ({len(self.track_buffers[track_id])}/{self.window_size})")
