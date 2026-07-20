@@ -8,6 +8,49 @@ WINDOW_SIZE = 30
 NUM_FEATURES = 46
 
 
+def crop_interaction_roi(frame, keypoints, bbox, padding=40):
+    """
+    Crops a square region enclosing the nose and the active elevated wrist with boundary clipping.
+    :param frame: raw OpenCV BGR image frame.
+    :param keypoints: keypoint array of shape [17, 2] containing coordinates for a detected person.
+    :param bbox: bounding box array [x1, y1, x2, y2] for the detected person.
+    :param padding: integer pixel padding added around the perimeter of the interaction coordinates.
+    :return: cropped OpenCV BGR image array or None if coordinates are invalid.
+    """
+
+    # Get frame boundaries:
+    height, width = frame.shape[:2]
+
+    # Extract nose and wrist keypoint coordinates:
+    nose_x, nose_y = keypoints[0]
+    lw_x, lw_y = keypoints[9]
+    rw_x, rw_y = keypoints[10]
+
+    # Determine which wrist is active (whichever is elevated closer to the top of the frame):
+    active_wrist = None
+    if lw_y > 0 and rw_y > 0:
+        active_wrist = (lw_x, lw_y) if lw_y < rw_y else (rw_x, rw_y)
+    elif lw_y > 0:
+        active_wrist = (lw_x, lw_y)
+    elif rw_y > 0:
+        active_wrist = (rw_x, rw_y)
+
+    # Validate that both the nose and an active wrist are tracked:
+    if nose_x > 0 and nose_y > 0 and active_wrist is not None:
+        
+        # Calculate bounding box encompassing the nose and active wrist:
+        min_x = max(0, int(min(nose_x, active_wrist[0]) - padding))
+        max_x = min(width, int(max(nose_x, active_wrist[0]) + padding))
+        min_y = max(0, int(min(nose_y, active_wrist[1]) - padding))
+        max_y = min(height, int(max(nose_y, active_wrist[1]) + padding))
+
+        # Check if the crop box maintains a valid area:
+        if max_x > min_x and max_y > min_y:
+            return frame[min_y:max_y, min_x:max_x]
+
+    return None
+
+
 def extract_features(keypoints, bbox):
     """
     Extracts 46 features per frame: 34 anatomically normalized coordinates + 12 orientation/kinematic metrics.

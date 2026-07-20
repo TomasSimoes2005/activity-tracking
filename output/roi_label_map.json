@@ -1,0 +1,7 @@
+{
+    "cellphone": 0,
+    "drink": 1,
+    "eat": 2,
+    "empty_hand": 3,
+    "smoke": 4
+}

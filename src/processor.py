@@ -3,6 +3,8 @@ import cv2
 from ultralytics import YOLO
 from src.action_predictor import ActionPredictor
 from src.dataset_writer import DatasetWriter
+from src.roi_classifier import ROIClassifier
+from src.shared import extract_features, crop_interaction_roi
 
 
 def draw_bottom_top5(frame, bbox, top_k_data):
@@ -50,7 +52,7 @@ def draw_bottom_top5(frame, bbox, top_k_data):
 
 def process_yolo(raw_buffer, annotated_buffer, record_label=None, custom_thresholds=None):
     """
-    Continuously pulls raw frames, runs YOLO tracking, and predicts multi-label actions.
+    Continuously pulls raw frames, runs YOLO tracking, and predicts multi-label actions with ROI refinement.
     If record_label is provided, it switches to Data Collection Mode and bypasses prediction.
     :param raw_buffer: FrameBuffer instance containing raw camera frames.
     :param annotated_buffer: FrameBuffer instance to store annotated frames.
@@ -63,16 +65,22 @@ def process_yolo(raw_buffer, annotated_buffer, record_label=None, custom_thresho
     model = YOLO("yolo11n-pose.pt")
     
     predictor = None
+    roi_classifier = None
     writer = None
 
     # Mode Selection: Live Inference vs. Data Recording
     if record_label:
         print(f"\n[Data Collection Mode] Recording physical actions for label: {record_label.upper()}")
-        # Initializes the 46-feature CSV layout defined in your DatasetWriter class:
         writer = DatasetWriter(filename=f"output/live_{record_label.lower()}.csv")
     else:
+
+        # Initialize inference ONNX temporal classifier:
         print("\n[Live Inference Mode] Initializing ONNX Engine...")
         predictor = ActionPredictor(model_path="output/model.onnx", label_map_path="output/label_map.json")
+        
+        # Initialize secondary gated ROI vision classifier:
+        print("[Live Inference Mode] Initializing ONNX ROI Vision Classifier...")
+        roi_classifier = ROIClassifier(model_path="output/roi_classifier.onnx", label_map_path="output/roi_label_map.json")
 
     # Processing loop:
     while True:
@@ -114,6 +122,36 @@ def process_yolo(raw_buffer, annotated_buffer, record_label=None, custom_thresho
                         custom_thresholds=custom_thresholds,
                         is_last_frame=False
                     )
+
+                    # Extract normalized features to check wrist-to-nose proximity:
+                    feats = extract_features(keypoints[i], bboxes[i])
+                    lw_to_nose = feats[34]
+                    rw_to_nose = feats[35]
+
+                    # Check if either wrist is within the anatomical interaction zone (< 1.5 ratio):
+                    is_wrist_near_face = (0.0 < lw_to_nose < 1.5) or (0.0 < rw_to_nose < 1.5)
+
+                    # If wrist is near face and we are not buffering, trigger the ROI patch classifier:
+                    if is_wrist_near_face and roi_classifier is not None and isinstance(top_data, list):
+                        
+                        # Crop the visual interaction zone:
+                        roi_patch = crop_interaction_roi(frame, keypoints[i], bboxes[i], padding=40)
+                        
+                        # Run classification on the patch:
+                        roi_result = roi_classifier.classify_patch(roi_patch, threshold=0.50)
+                        
+                        # Refine predictions by boosting or overriding confusing face-level actions:
+                        if roi_result is not None:
+                            roi_label, roi_prob = roi_result
+                            
+                            # Filter out generic temporal predictions that conflict with visual object proof:
+                            confusing_classes = {"EAT", "DRINK", "SMOKE", "CELLPHONE"}
+                            filtered_data = [item for item in top_data if item[0] not in confusing_classes]
+                            
+                            # Inject the visually confirmed ROI label at the top of the action list:
+                            if roi_label != "EMPTY_HAND":
+                                filtered_data.insert(0, (roi_label, roi_prob))
+                                top_data = filtered_data
 
                     # Draw the labels onto the frame:
                     draw_bottom_top5(res_annotated, bboxes[i], top_data)
