@@ -1,8 +1,7 @@
 import csv
 import os
-import numpy as np
 from collections import defaultdict, deque
-from src.shared import WINDOW_SIZE, NUM_FEATURES, extract_features
+from src.shared import WINDOW_SIZE, extract_features
 
 
 class DatasetWriter:

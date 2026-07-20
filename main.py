@@ -86,11 +86,10 @@ from src.server import run_server
 stop_event = threading.Event()
 
 
-def custom_handler(signum, frame):
+def custom_handler(signum, _):
     """
     Custom signal handler that triggers the shutdown event.
     :param signum: integer representing the signal number.
-    :param frame: current stack frame.
     """
 
     try:

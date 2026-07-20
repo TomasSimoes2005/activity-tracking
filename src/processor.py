@@ -1,6 +1,5 @@
 import time
 import cv2
-import numpy as np
 from ultralytics import YOLO
 from src.action_predictor import ActionPredictor
 from src.dataset_writer import DatasetWriter
