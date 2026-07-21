@@ -12,7 +12,7 @@ from torchvision import datasets, transforms, models
 from ultralytics import YOLO
 from sklearn.metrics import precision_recall_fscore_support, average_precision_score, accuracy_score
 from src.action_model import ActionDataset, ActionHybridNet
-from src.shared import WINDOW_SIZE, NUM_FEATURES, extract_features, crop_interaction_roi
+from src.shared import WINDOW_SIZE, NUM_FEATURES, extract_features, crop_interaction_roi, should_trigger_roi_crop
 
 # File paths and configuration constants:
 TEMPORAL_BATCH_SIZE = 32
@@ -343,8 +343,14 @@ def test_end_to_end_fused_pipeline(device, video_dir=VIDEO_DIR, csv_list=CSV_ANN
 
     # 1. DYNAMIC PER-CLASS DECISION THRESHOLDS (Loaded from optimization scans):
     dynamic_thresholds = {
-        "cellphone": 0.32, "drink": 0.45, "eat": 0.38, "fall_floor": 0.52,
-        "lie_sleep": 0.45, "sit": 0.38, "smoke": 0.30, "stand": 0.42
+        "cellphone": 0.54,
+        "drink": 0.52,
+        "eat": 0.49,
+        "fall_floor": 0.49,
+        "lie_sleep": 0.39,
+        "sit": 0.46,
+        "smoke": 0.42,
+        "stand": 0.39
     }
 
     # 2. MUTUALLY EXCLUSIVE POSTURE INDICES:
@@ -352,7 +358,7 @@ def test_end_to_end_fused_pipeline(device, video_dir=VIDEO_DIR, csv_list=CSV_ANN
     posture_indices = [temporal_label_map[c] for c in posture_classes if c in temporal_label_map]
 
     grouped_seqs = df_matched.groupby(["video_id", "timestamp"])
-    print(f"Executing Optimized Inference across {len(grouped_seqs)} unique sequences...\n")
+    print(f"Executing Inference across {len(grouped_seqs)} unique sequences...\n")
 
     y_true_list, y_fused_prob_list = [], []
     c = 0
@@ -395,11 +401,13 @@ def test_end_to_end_fused_pipeline(device, video_dir=VIDEO_DIR, csv_list=CSV_ANN
                 feats = extract_features(best_kpts, best_box)
                 feature_buffer.append(feats)
                 if f_idx == WINDOW_SIZE // 2:
-                    if (0.0 < feats[34] < 1.5) or (0.0 < feats[35] < 1.5):
-                        center_wrist_near_face = True
-                        roi_crop = crop_interaction_roi(frame, best_kpts, best_box, padding=40)
-                        if roi_crop is not None and roi_crop.size > 0: center_frame_patch = cv2.resize(roi_crop,
-                                                                                                       (224, 224))
+                    # Apply Two-Zone Scale-Invariant Gate (Face & Chest/Texting)
+                    should_crop, zone_type = should_trigger_roi_crop(best_kpts, best_box)
+                    if should_crop:
+                        center_wrist_near_face = True  # Triggers downstream ROI alpha-blending
+                        roi_crop = crop_interaction_roi(frame, best_kpts, best_box, padding=40, zone_type=zone_type)
+                        if roi_crop is not None and roi_crop.size > 0:
+                            center_frame_patch = cv2.resize(roi_crop, (224, 224))
             else:
                 feature_buffer.append(feature_buffer[-1] if feature_buffer else [0.0] * NUM_FEATURES)
         cap.release()
@@ -461,7 +469,7 @@ def test_end_to_end_fused_pipeline(device, video_dir=VIDEO_DIR, csv_list=CSV_ANN
         y_true_list.append(target_vector)
         y_fused_prob_list.append(fused_probs)
 
-    # Calculate Optimized Metrics using Dynamic Thresholds:
+    # Calculate Metrics using Dynamic Thresholds:
     y_true_matrix = np.vstack(y_true_list)
     y_fused_matrix = np.vstack(y_fused_prob_list)
 
@@ -474,7 +482,7 @@ def test_end_to_end_fused_pipeline(device, video_dir=VIDEO_DIR, csv_list=CSV_ANN
     exact_match_acc = accuracy_score(y_true_matrix.astype(np.int32), y_bin_pred) * 100.0
 
     print("\n" + "=" * 83)
-    print("STAGE 4 (OPTIMIZED): FUSED PIPELINE PERFORMANCE SUMMARY")
+    print("STAGE 4: FUSED PIPELINE PERFORMANCE SUMMARY")
     print("=" * 83)
     print(f"Total Video Sequences Evaluated: {len(y_true_matrix)}")
     print(f"Exact Match Ratio (Subset Acc) : {exact_match_acc:.2f}% (Surged via Mutually Exclusive Gating)")

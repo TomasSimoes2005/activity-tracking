@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 BATCH_SIZE = 32
 LEARNING_RATE = 0.0003
 WEIGHT_DECAY = 0.01
-EPOCHS = 15
+EPOCHS = 30
 DATA_DIR = "dataset/roi_train"
 MODEL_SAVE_PATH = "output/roi_classifier.pth"
 ONNX_SAVE_PATH = "output/roi_classifier.onnx"

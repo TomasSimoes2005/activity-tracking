@@ -8,25 +8,55 @@ WINDOW_SIZE = 30
 NUM_FEATURES = 46
 
 
-def crop_interaction_roi(frame, keypoints, bbox, padding=40):
+def should_trigger_roi_crop(kpts, box, thresh_face=0.60, thresh_chest=0.45):
     """
-    Crops a square region enclosing the nose and the active elevated wrist with boundary clipping.
-    :param frame: raw OpenCV BGR image frame.
-    :param keypoints: keypoint array of shape [17, 2] containing coordinates for a detected person.
-    :param bbox: bounding box array [x1, y1, x2, y2] for the detected person.
-    :param padding: integer pixel padding added around the perimeter of the interaction coordinates.
-    :return: cropped OpenCV BGR image array or None if coordinates are invalid.
+    Determines if an ROI crop should be triggered using scale-invariant anatomical distances.
+    Returns: (boolean should_crop, string zone_type)
+    """
+    # 1. Calculate Physiological Reference Scale (Torso Length)
+    mid_shoulder = (kpts[5][:2] + kpts[6][:2]) / 2.0
+    mid_hip = (kpts[11][:2] + kpts[12][:2]) / 2.0
+    torso_length = np.linalg.norm(mid_shoulder - mid_hip)
+    
+    # Fallback to bounding box height if torso length is degenerate (severe occlusion)
+    if torso_length < 1e-3:
+        torso_length = max(1.0, box[3] - box[1]) * 0.4
+
+    # 2. Extract active keypoints
+    nose = kpts[0][:2]
+    wrists = [kpts[9][:2], kpts[10][:2]]
+    wrist_confs = [kpts[9][2], kpts[10][2]] if kpts.shape[1] > 2 else [1.0, 1.0]
+
+    for wrist, conf in zip(wrists, wrist_confs):
+        if conf < 0.3:  # Skip low-confidence wrist detections
+            continue
+            
+        # Head/Face Gate (Phone calls, Drinking, Eating, Smoking)
+        dist_to_nose = np.linalg.norm(wrist - nose) / torso_length
+        if dist_to_nose < thresh_face:
+            return True, "face"
+
+        # Chest/Texting Gate (Texting, browsing phone)
+        dist_to_chest = np.linalg.norm(wrist - mid_shoulder) / torso_length
+        is_below_shoulders = wrist[1] >= mid_shoulder[1] - (0.1 * torso_length)
+        is_above_hips = wrist[1] <= mid_hip[1] + (0.2 * torso_length)
+        
+        if (dist_to_chest < thresh_chest) and is_below_shoulders and is_above_hips:
+            return True, "chest"
+
+    return False, None
+
+
+def crop_interaction_roi(frame, keypoints, bbox, padding=40, zone_type="face"):
+    """
+    Crops a square region enclosing the interaction area based on the triggered anatomical zone.
     """
 
-    # Get frame boundaries:
     height, width = frame.shape[:2]
+    lw_x, lw_y = keypoints[9][:2]
+    rw_x, rw_y = keypoints[10][:2]
 
-    # Extract nose and wrist keypoint coordinates:
-    nose_x, nose_y = keypoints[0]
-    lw_x, lw_y = keypoints[9]
-    rw_x, rw_y = keypoints[10]
-
-    # Determine which wrist is active (whichever is elevated closer to the top of the frame):
+    # Determine active wrist:
     active_wrist = None
     if lw_y > 0 and rw_y > 0:
         active_wrist = (lw_x, lw_y) if lw_y < rw_y else (rw_x, rw_y)
@@ -35,18 +65,31 @@ def crop_interaction_roi(frame, keypoints, bbox, padding=40):
     elif rw_y > 0:
         active_wrist = (rw_x, rw_y)
 
-    # Validate that both the nose and an active wrist are tracked:
-    if nose_x > 0 and nose_y > 0 and active_wrist is not None:
-        
-        # Calculate bounding box encompassing the nose and active wrist:
-        min_x = max(0, int(min(nose_x, active_wrist[0]) - padding))
-        max_x = min(width, int(max(nose_x, active_wrist[0]) + padding))
-        min_y = max(0, int(min(nose_y, active_wrist[1]) - padding))
-        max_y = min(height, int(max(nose_y, active_wrist[1]) + padding))
+    if active_wrist is None:
+        return None
 
-        # Check if the crop box maintains a valid area:
-        if max_x > min_x and max_y > min_y:
-            return frame[min_y:max_y, min_x:max_x]
+    # Define crop anchor based on zone type
+    if zone_type == "chest":
+        # Anchor between shoulders and active wrist for texting/lap usage
+        ls_x, ls_y = keypoints[5][:2]
+        rs_x, rs_y = keypoints[6][:2]
+        anchor_x = (ls_x + rs_x) / 2.0 if (ls_x > 0 and rs_x > 0) else active_wrist[0]
+        anchor_y = (ls_y + rs_y) / 2.0 if (ls_y > 0 and rs_y > 0) else active_wrist[1]
+    else:
+        # Default Zone 1: Anchor between nose and active wrist
+        nose_x, nose_y = keypoints[0][:2]
+        if nose_x <= 0 or nose_y <= 0:
+            return None
+        anchor_x, anchor_y = nose_x, nose_y
+
+    # Calculate bounding box encompassing the anchor and active wrist
+    min_x = max(0, int(min(anchor_x, active_wrist[0]) - padding))
+    max_x = min(width, int(max(anchor_x, active_wrist[0]) + padding))
+    min_y = max(0, int(min(anchor_y, active_wrist[1]) - padding))
+    max_y = min(height, int(max(anchor_y, active_wrist[1]) + padding))
+
+    if max_x > min_x and max_y > min_y:
+        return frame[min_y:max_y, min_x:max_x]
 
     return None
 

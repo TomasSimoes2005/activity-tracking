@@ -127,14 +127,14 @@ def main():
 
     # Define optimal class thresholds:
     optimal_thresholds = {
-        "CELLPHONE": 0.30,
-        "DRINK": 0.56,
-        "EAT": 0.35,
-        "FALL_FLOOR": 0.55,
-        "LIE_SLEEP": 0.48,
-        "SIT": 0.37,
-        "SMOKE": 0.40,
-        "STAND": 0.48
+        "cellphone": 0.54,
+        "drink": 0.52,
+        "eat": 0.49,
+        "fall_floor": 0.49,
+        "lie_sleep": 0.39,
+        "sit": 0.46,
+        "smoke": 0.42,
+        "stand": 0.39
     }
 
     # Start yolo thread:

@@ -48,10 +48,10 @@ class DatasetWriter:
 
     def _extract_enriched_features(self, keypoints, bbox):
         """
-        Extracts 42 features per frame: 34 anatomically normalized coordinates + 8 orientation/kinematic metrics.
+        Extracts 46 features per frame: 34 anatomically normalized coordinates + 12 orientation/kinematic metrics.
         :param keypoints: keypoint data.
         :param bbox: bounding box data.
-        :return: enriched feature list of length 42.
+        :return: enriched feature list of length 46.
         """
 
         return extract_features(keypoints, bbox)

@@ -5,7 +5,7 @@ from ultralytics import YOLO
 from src.action_predictor import ActionPredictor
 from src.dataset_writer import DatasetWriter
 from src.roi_classifier import ROIClassifier
-from src.shared import extract_features, crop_interaction_roi
+from src.shared import extract_features, crop_interaction_roi, should_trigger_roi_crop
 
 
 def draw_bottom_top5(frame, bbox, top_k_data):
@@ -128,12 +128,10 @@ def process_yolo(raw_buffer, annotated_buffer, record_label=None, custom_thresho
                     label_to_idx = {v: k for k, v in temp_map.items()}
 
                     # 2. Check wrist-to-nose proximity for ROI vision triggering:
-                    feats = extract_features(keypoints[i], bboxes[i])
-                    lw_to_nose, rw_to_nose = feats[34], feats[35]
-                    is_wrist_near_face = (0.0 < lw_to_nose < 1.5) or (0.0 < rw_to_nose < 1.5)
+                    should_crop, zone_type = should_trigger_roi_crop(keypoints[i], bboxes[i])
 
-                    if is_wrist_near_face and roi_classifier is not None:
-                        roi_patch = crop_interaction_roi(frame, keypoints[i], bboxes[i], padding=40)
+                    if should_crop and roi_classifier is not None:
+                        roi_patch = crop_interaction_roi(frame, keypoints[i], bboxes[i], padding=40, zone_type=zone_type)
                         roi_probs, roi_map = roi_classifier.get_patch_probabilities(roi_patch)
 
                         if roi_probs is not None:
@@ -146,7 +144,7 @@ def process_yolo(raw_buffer, annotated_buffer, record_label=None, custom_thresho
                                     r_idx = roi_label_to_idx[oral_cls]
                                     fused_probs[t_idx] = (0.30 * fused_probs[t_idx]) + (0.70 * roi_probs[r_idx])
 
-                            # ALPHA BLEND: 75% Skeleton / 25% Vision for Cellphone (occlusion resistant)
+                            # ALPHA BLEND: 75% Skeleton / 25% Vision for Cellphone
                             if "CELLPHONE" in label_to_idx and "CELLPHONE" in roi_label_to_idx:
                                 t_idx = label_to_idx["CELLPHONE"]
                                 r_idx = roi_label_to_idx["CELLPHONE"]
