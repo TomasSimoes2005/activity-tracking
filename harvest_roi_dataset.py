@@ -10,8 +10,7 @@ from src.shared import extract_features, crop_interaction_roi
 TARGET_ROI_MAP = {
     27: "drink",
     29: "eat",
-    54: "smoke",
-    57: "cellphone"
+    54: "smoke"
 }
 
 # Baseline AVA action IDs used to harvest "empty_hand" negative samples when wrist is near face:

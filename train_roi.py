@@ -18,6 +18,24 @@ ONNX_SAVE_PATH = "output/roi_classifier.onnx"
 LABEL_MAP_PATH = "output/roi_label_map.json"
 
 
+class FocalLoss(nn.Module):
+    """
+    Multi-class Focal Loss. Forces the optimizer to care about hard minority positive crops
+    (like SMOKE and CELLPHONE) while downweighting easy background classifications.
+    """
+
+    def __init__(self, alpha=None, gamma=2.0, label_smoothing=0.1):
+        super(FocalLoss, self).__init__()
+        self.gamma = gamma
+        self.ce = nn.CrossEntropyLoss(weight=alpha, label_smoothing=label_smoothing, reduction='none')
+
+    def forward(self, inputs, targets):
+        ce_loss = self.ce(inputs, targets)
+        pt = torch.exp(-ce_loss)
+        focal_loss = ((1.0 - pt) ** self.gamma) * ce_loss
+        return focal_loss.mean()
+
+
 def train_and_export_roi():
     """
     Executes an 80/20 train-validation fine-tuning loop for MobileNetV3-Small on cropped interaction patches.
@@ -83,24 +101,24 @@ def train_and_export_roi():
     # Initialize pretrained MobileNetV3-Small:
     model = models.mobilenet_v3_small(weights=models.MobileNet_V3_Small_Weights.DEFAULT)
     
-    # Slashes CPU training time and prevents background memorization:
-    for param in model.features[:-1].parameters():
+    # Unfreeze Blocks 10, 11, and 12 for deeper adaptation:
+    for param in model.features[:-3].parameters():
         param.requires_grad = False
-    for param in model.features[-1].parameters():
+    for param in model.features[-3:].parameters():
         param.requires_grad = True
-    print("Locked Blocks 0-11. Unfroze only final semantic block (Block 12)...")
+    print("Locked Blocks 0-9. Unfroze deep semantic Blocks 10, 11, and 12...")
 
     model.classifier[2] = nn.Dropout(p=0.5)
     in_features = model.classifier[3].in_features
     model.classifier[3] = nn.Linear(in_features, num_classes)
     model = model.to(device)
 
-    # Loss with label smoothing to curb overconfidence on blurry crops:
-    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+    # Use Focal Loss with gamma=2.0 instead of standard CrossEntropy:
+    criterion = FocalLoss(gamma=2.0, label_smoothing=0.1)
     
-    # Pass only unfrozen parameters to the optimizer:
+    # Use differential learning rate to protect pretrained weights:
     trainable_params = filter(lambda p: p.requires_grad, model.parameters())
-    optimizer = torch.optim.AdamW(trainable_params, lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    optimizer = torch.optim.AdamW(trainable_params, lr=1e-4, weight_decay=WEIGHT_DECAY)
     
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-6)
 

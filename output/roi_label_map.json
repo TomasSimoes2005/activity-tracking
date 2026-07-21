@@ -1,7 +1,6 @@
 {
-    "cellphone": 0,
-    "drink": 1,
-    "eat": 2,
-    "empty_hand": 3,
-    "smoke": 4
+    "drink": 0,
+    "eat": 1,
+    "empty_hand": 2,
+    "smoke": 3
 }

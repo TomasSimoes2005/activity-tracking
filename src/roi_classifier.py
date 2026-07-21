@@ -73,6 +73,21 @@ class ROIClassifier:
         # Transpose from [H, W, C] to [C, H, W] and add batch dimension:
         tensor_data = np.transpose(norm_img, (2, 0, 1))
         return np.expand_dims(tensor_data, axis=0)
+    
+    def get_patch_probabilities(self, roi_patch):
+        """
+        Returns the raw Softmax probability vector and class map for ROI patches.
+        """
+        
+        if self.session is None or roi_patch is None or roi_patch.size == 0:
+            return None, None
+
+        input_tensor = self._preprocess_image(roi_patch)
+        logits = self.session.run(None, {self.input_name: input_tensor})[0][0]
+        
+        exp_logits = np.exp(logits - np.max(logits))
+        probabilities = exp_logits / np.sum(exp_logits)
+        return probabilities, self.idx_to_label
 
     def classify_patch(self, roi_patch, threshold=0.45):
         """

@@ -60,6 +60,30 @@ class ActionPredictor:
         """
 
         return extract_features(keypoints, bbox)
+    
+    def get_raw_probabilities(self, track_id, keypoints, bbox, is_last_frame=False, min_frames=10):
+            """
+            Returns the raw Sigmoid probability vector and class map for advanced blending math.
+            """
+
+            if self.session is None:
+                return None, None
+
+            norm_kpts = self._extract_enriched_features(keypoints, bbox)
+            self.track_buffers[track_id].append(norm_kpts)
+
+            if is_last_frame and min_frames <= len(self.track_buffers[track_id]) < self.window_size:
+                last_pose = self.track_buffers[track_id][-1]
+                while len(self.track_buffers[track_id]) < self.window_size:
+                    self.track_buffers[track_id].append(last_pose)
+
+            if len(self.track_buffers[track_id]) == self.window_size:
+                input_seq = np.array(self.track_buffers[track_id], dtype=np.float32).reshape(1, self.window_size, NUM_FEATURES)
+                logits = self.session.run(None, {self.input_name: input_seq})[0][0]
+                probabilities = 1.0 / (1.0 + np.exp(-logits))
+                return probabilities, self.idx_to_label
+
+            return f"BUFFERING ({len(self.track_buffers[track_id])}/{self.window_size})", None
 
     def predict(self, track_id, keypoints, bbox):
         """

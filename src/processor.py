@@ -1,5 +1,6 @@
 import time
 import cv2
+import numpy as np
 from ultralytics import YOLO
 from src.action_predictor import ActionPredictor
 from src.dataset_writer import DatasetWriter
@@ -113,47 +114,78 @@ def process_yolo(raw_buffer, annotated_buffer, record_label=None, custom_thresho
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                 
                 elif predictor is not None:
-                    # Predict multi-label actions using custom thresholds:
-                    top_data = predictor.predict_multi_label(
-                        track_id,
-                        keypoints[i],
-                        bboxes[i],
-                        default_threshold=0.40,
-                        custom_thresholds=custom_thresholds,
-                        is_last_frame=False
-                    )
 
-                    # Extract normalized features to check wrist-to-nose proximity:
+                    # 1. Pull raw temporal probabilities:
+                    temp_result, temp_map = predictor.get_raw_probabilities(track_id, keypoints[i], bboxes[i])
+
+                    if isinstance(temp_result, str):
+                        draw_bottom_top5(res_annotated, bboxes[i], temp_result)
+                        continue
+                    elif temp_result is None:
+                        continue
+
+                    fused_probs = temp_result.copy()
+                    label_to_idx = {v: k for k, v in temp_map.items()}
+
+                    # 2. Check wrist-to-nose proximity for ROI vision triggering:
                     feats = extract_features(keypoints[i], bboxes[i])
-                    lw_to_nose = feats[34]
-                    rw_to_nose = feats[35]
-
-                    # Check if either wrist is within the anatomical interaction zone (< 1.5 ratio):
+                    lw_to_nose, rw_to_nose = feats[34], feats[35]
                     is_wrist_near_face = (0.0 < lw_to_nose < 1.5) or (0.0 < rw_to_nose < 1.5)
 
-                    # If wrist is near face and we are not buffering, trigger the ROI patch classifier:
-                    if is_wrist_near_face and roi_classifier is not None and isinstance(top_data, list):
-                        
-                        # Crop the visual interaction zone:
+                    if is_wrist_near_face and roi_classifier is not None:
                         roi_patch = crop_interaction_roi(frame, keypoints[i], bboxes[i], padding=40)
-                        
-                        # Run classification on the patch:
-                        roi_result = roi_classifier.classify_patch(roi_patch, threshold=0.50)
-                        
-                        # Refine predictions by boosting or overriding confusing face-level actions:
-                        if roi_result is not None:
-                            roi_label, roi_prob = roi_result
-                            
-                            # Filter out generic temporal predictions that conflict with visual object proof:
-                            confusing_classes = {"EAT", "DRINK", "SMOKE", "CELLPHONE"}
-                            filtered_data = [item for item in top_data if item[0] not in confusing_classes]
-                            
-                            # Inject the visually confirmed ROI label at the top of the action list:
-                            if roi_label != "EMPTY_HAND":
-                                filtered_data.insert(0, (roi_label, roi_prob))
-                                top_data = filtered_data
+                        roi_probs, roi_map = roi_classifier.get_patch_probabilities(roi_patch)
 
-                    # Draw the labels onto the frame:
+                        if roi_probs is not None:
+                            roi_label_to_idx = {v: k for k, v in roi_map.items()}
+                            
+                            # ALPHA BLEND: 30% Skeleton / 70% Vision for Oral Interactions
+                            for oral_cls in ["DRINK", "EAT", "SMOKE"]:
+                                if oral_cls in label_to_idx and oral_cls in roi_label_to_idx:
+                                    t_idx = label_to_idx[oral_cls]
+                                    r_idx = roi_label_to_idx[oral_cls]
+                                    fused_probs[t_idx] = (0.30 * fused_probs[t_idx]) + (0.70 * roi_probs[r_idx])
+
+                            # ALPHA BLEND: 75% Skeleton / 25% Vision for Cellphone (occlusion resistant)
+                            if "CELLPHONE" in label_to_idx and "CELLPHONE" in roi_label_to_idx:
+                                t_idx = label_to_idx["CELLPHONE"]
+                                r_idx = roi_label_to_idx["CELLPHONE"]
+                                fused_probs[t_idx] = (0.75 * fused_probs[t_idx]) + (0.25 * roi_probs[r_idx])
+
+                            # GATING: If vision sees an Empty Hand (>65%), suppress false interaction triggers
+                            if "EMPTY_HAND" in roi_label_to_idx and roi_probs[roi_label_to_idx["EMPTY_HAND"]] > 0.65:
+                                for action_cls in ["DRINK", "EAT", "SMOKE", "CELLPHONE"]:
+                                    if action_cls in label_to_idx:
+                                        fused_probs[label_to_idx[action_cls]] *= 0.25
+
+                    # 3. REALITY GATE: Enforce Mutually Exclusive Postures & Interactions
+                    posture_cluster = ["SIT", "STAND", "LIE_SLEEP", "FALL_FLOOR"]
+                    posture_indices = [label_to_idx[c] for c in posture_cluster if c in label_to_idx]
+                    if posture_indices:
+                        best_post_idx = posture_indices[np.argmax([fused_probs[idx] for idx in posture_indices])]
+                        for idx in posture_indices:
+                            if idx != best_post_idx: fused_probs[idx] = 0.001
+
+                    oral_cluster = ["EAT", "DRINK", "SMOKE"]
+                    oral_indices = [label_to_idx[c] for c in oral_cluster if c in label_to_idx]
+                    if oral_indices:
+                        best_oral_idx = oral_indices[np.argmax([fused_probs[idx] for idx in oral_indices])]
+                        for idx in oral_indices:
+                            if idx != best_oral_idx: fused_probs[idx] = 0.001
+
+                    # 4. Apply Dynamic Decision Thresholds:
+                    top_data = []
+                    for idx, prob in enumerate(fused_probs):
+                        label_str = temp_map[idx]
+                        thresh = custom_thresholds.get(label_str, 0.40) if custom_thresholds else 0.40
+                        if prob >= thresh:
+                            top_data.append((label_str, float(prob)))
+
+                    top_data.sort(key=lambda x: x[1], reverse=True)
+                    if not top_data:
+                        best_idx = int(np.argmax(fused_probs))
+                        top_data = [(temp_map[best_idx], float(fused_probs[best_idx]))]
+
                     draw_bottom_top5(res_annotated, bboxes[i], top_data)
 
         # Push annotated frame to the web server buffer:
